@@ -1,0 +1,201 @@
+---
+- name: Configure a host as a Keycloak SSO Server
+  hosts: all
+  
+  tasks:
+    - name: Include the needed variables
+      include_vars: vars/main.yaml
+
+    - name: Set hostname
+      hostname:
+        name: "{{ server_hostname }}"
+
+    - name: Enable EPEL for Certbot
+      yum:
+        name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+        state: latest
+        disable_gpg_check: yes
+
+    - name: Run system update
+      yum:
+        name: '*'
+        state: latest
+      tags:
+        - system_update
+
+    - name: Install base packages
+      yum:
+        name: "{{ keycloak_base_packages }}"
+        state: latest
+      tags:
+        - install_base_packages
+
+    - name: Start Firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Set services for Keycloak on Firewalld
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        permanent: yes
+        immediate: yes
+      with_items: "{{ firewalld_services }}"
+
+    - name: Template over HTTPd server configuration
+      template:
+        src: httpd_rev_proxy.conf.j2
+        dest: /etc/httpd/conf.d/keycloak-rev-proxy.conf
+        owner: root
+        group: root
+
+    - name: Stop HTTPd server prior to Certbot generation
+      service:
+        name: httpd
+        state: stopped
+    
+    - name: Get SSL Certificates from Certbot
+      shell: "certbot certonly --standalone -d {{ server_fqdn }} --non-interactive --agree-tos -m {{ certbot_email }}"
+      args:
+        creates: "/etc/letsencrypt/live/{{ server_fqdn }}/fullchain.pem"
+
+    - name: Set up Certbot renewal
+      cron:
+        name: certbotRenewal
+        minute: "0"
+        hour: "0,12"
+        user: root
+        job: "python3 -c 'import random; import time; time.sleep(random.random() * 3600)' && certbot renew -q  --pre-hook 'service httpd stop' --post-hook 'service httpd start'"
+        cron_file: ansible_certbot-renewal
+
+    - name: Set httpd_can_network_connect flag on and keep it persistent across reboots
+      seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+
+    - name: Start HTTPd server after Certbot generation
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+
+    - name: Install Java 8 with OpenJDK
+      include_role:
+        name: geerlingguy.java
+      vars:
+        java_packages:
+          - java-1.8.0-openjdk
+      tags:
+        - install_java
+
+    - name: Install mySQL
+      include_role:
+        name: geerlingguy.mysql
+      vars:
+        mysql_enabled_on_startup: true
+        mysql_databases:
+          - name: "{{ keycloak_mysql_database }}"
+        mysql_users:
+          - name: "{{ keycloak_mysql_username }}"
+            password: "{{ keycloak_mysql_password }}"
+            state: present
+            host: "%"
+            priv: "{{ keycloak_mysql_database }}.*:ALL"
+
+    - name: Ensure group keycloak exists
+      group:
+        name: "{{ keycloak_system_group }}"
+        state: present
+
+    - name: Ensure keycloak user exists
+      user:
+        name: "{{ keycloak_system_username }}"
+        state: present
+        group: "{{ keycloak_system_group }}"
+        system: yes
+
+    - name: Download the Keycloak package
+      get_url:
+        url: "https://downloads.jboss.org/keycloak/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.zip"
+        dest: "/opt"
+      tags:
+        - download_keycloak
+      register: downloaded_file
+
+    - name: Unzip Keycloak package
+      unarchive:
+        src: "/opt/keycloak-{{ keycloak_version }}.zip"
+        dest: "/opt"
+        remote_src: yes
+        owner: keycloak
+        group: keycloak
+      tags:
+        - download_keycloak
+        - unzip_keycloak
+      when: downloaded_file.changed
+
+    - name: Ensure mysql directory exists in Keycloak modules
+      file:
+        path: "/opt/keycloak-{{ keycloak_version }}/modules/system/layers/keycloak/com/mysql/main"
+        state: directory
+        owner: keycloak
+        group: keycloak
+
+    - name: Unzip mySQL JDBC
+      unarchive:
+        src: "https://dev.mysql.com/get/Downloads/Connector-J/mysql-connector-java-{{ mysql_connector_version }}.zip"
+        dest: /opt
+        remote_src: yes
+        owner: keycloak
+        group: keycloak
+
+    - name: Copy over mySQL JDBC JAR
+      copy:
+        src: "/opt/mysql-connector-java-{{ mysql_connector_version }}/mysql-connector-java-{{ mysql_connector_version }}.jar"
+        dest: "/opt/keycloak-{{ keycloak_version }}/modules/system/layers/keycloak/com/mysql/main/mysql-connector-java-{{ mysql_connector_version }}.jar"
+        remote_src: yes
+        owner: keycloak
+        group: keycloak
+
+    - name: Template over mySQL JDBC module.xml
+      template:
+        src: mysql_module.xml.j2
+        dest: "/opt/keycloak-{{ keycloak_version }}/modules/system/layers/keycloak/com/mysql/main/module.xml"
+        owner: keycloak
+        group: keycloak
+
+    - name: Template over standalone.xml file
+      template:
+        src: standalone.xml.j2
+        dest: "/opt/keycloak-{{ keycloak_version }}/standalone/configuration/standalone.xml"
+        owner: keycloak
+        group: keycloak
+
+    - name: Insert mySQL module into JBoss
+      become: yes
+      become_user: keycloak
+      shell: |
+        /opt/keycloak-{{ keycloak_version }}/bin/jboss-cli.sh --command="module add --name=com.mysql --resources=/opt/keycloak-{{ keycloak_version }}/modules/system/layers/keycloak/com/mysql/main/mysql-connector-java-{{ mysql_connector_version }}.jar --dependencies=javax.api,javax.transaction.api"
+        touch /opt/keycloak-{{ keycloak_version }}/.module_added
+      args:
+        creates: "/opt/keycloak-{{ keycloak_version }}/.module_added"
+
+    - name: Add Initial Keycloak Admin user
+      shell: "/opt/keycloak-{{ keycloak_version }}/bin/add-user-keycloak.sh -u {{ keycloak_admin_user }} -p {{ keycloak_admin_pass }}"
+
+    - name: Template over the Keycloak service file
+      template:
+        src: keycloak.service.j2
+        dest: /etc/systemd/system/keycloak.service
+        owner: root
+        group: root
+
+    - name: Reload systemd daemon and start Keycloak service
+      systemd:
+        name: keycloak.service
+        state: restarted
+        daemon_reload: yes
+        enabled: yes

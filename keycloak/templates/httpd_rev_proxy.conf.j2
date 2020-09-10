@@ -1,0 +1,28 @@
+<VirtualHost *:443>
+  ServerName {{ server_fqdn }}
+
+  ErrorLog  "logs/keycloak_error_ssl.log"
+  CustomLog "logs/keycloak_access_ssl.log" combined
+
+  SSLEngine On
+  SSLCertificateFile "/etc/letsencrypt/live/{{ server_fqdn }}/cert.pem"
+  SSLCertificateKeyFile "/etc/letsencrypt/live/{{ server_fqdn }}/privkey.pem"
+  SSLCertificateChainFile "/etc/letsencrypt/live/{{ server_fqdn }}/chain.pem"
+
+  SSLProxyEngine On
+  SSLProxyVerify none
+  SSLProxyCheckPeerName Off
+  SSLProxyCheckPeerCN Off
+  SSLProxyCheckPeerExpire Off
+
+  # Proxy rules
+  ProxyRequests Off
+  ProxyPreserveHost On
+  ProxyPass "/" "https://localhost:8443/" Keepalive=On
+  ProxyPassReverse "/" "https://localhost:8443/"
+
+  ## Request header rules
+  ## as per http://httpd.apache.org/docs/2.2/mod/mod_headers.html#requestheader
+  RequestHeader set X-Forwarded-Proto "https"
+  RequestHeader set X-Forwarded-Port "443"
+</VirtualHost>

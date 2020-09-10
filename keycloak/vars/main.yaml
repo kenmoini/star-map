@@ -1,0 +1,35 @@
+---
+keycloak_version: 11.0.2
+mysql_connector_version: 8.0.21
+
+server_hostname: star-map-sso
+server_domain: polyglot.host
+server_fqdn: "{{ server_hostname }}.{{ server_domain }}"
+
+certbot_email: ken@kenmoini.com
+
+keycloak_system_username: keycloak
+keycloak_system_group: keycloak
+
+keycloak_admin_user: keycloakAdmin
+keycloak_admin_pass: sup3rS3cur3
+
+keycloak_base_packages:
+  - zip
+  - unzip
+  - gzip
+  - tar
+  - firewalld
+  - certbot
+  - httpd
+  - mod_ssl
+  - mod_proxy_html
+
+keycloak_mysql_database: keycloak
+keycloak_mysql_username: keycloaksso
+keycloak_mysql_password: u1tr4S3cr3t
+
+firewalld_services:
+  - http
+  - https
+  - ssh
